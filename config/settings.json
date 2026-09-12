@@ -1,0 +1,17 @@
+{
+    "auto_start": true,
+    "scan_interval": 10,
+    "alert_threshold": "medium",
+    "ai_provider": "gemini",
+    "api_key": "",
+    "model": "gemini-3.5-flash",
+    "monitoring": {
+        "enabled": true,
+        "log_suspicious": true,
+        "notify_user": true
+    },
+    "database": {
+        "path": "~/.guardian_agent/guardian.db",
+        "retention_days": 30
+    }
+}

@@ -1,0 +1,33 @@
+# Core
+psutil>=5.9.0
+rich>=13.5.0          # For beautiful terminal UI
+textual>=0.41.0       # For advanced TUI
+tabulate>=0.9.0       # For table formatting
+colorama>=0.4.6       # For colors in terminal
+
+# AI Integration
+openai>=1.0.0
+google-generativeai>=0.3.0
+langchain>=0.3.0
+langchain-openai>=0.1.0
+langchain-community>=0.3.0
+chromadb>=0.5.0
+sentence-transformers>=2.2.0
+
+# Database
+
+# Network
+requests>=2.31.0
+websocket-client>=1.5.0
+flask>=3.0.0
+flask-cors>=4.0.0
+flask-socketio>=5.3.0
+
+# Reporting
+reportlab>=4.0.0
+
+# Config
+python-dotenv>=1.0.0
+
+# System
+pywin32>=305; platform_system=="Windows"  # For Windows process detection
