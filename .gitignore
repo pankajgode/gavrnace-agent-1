@@ -1,8 +1,11 @@
-﻿venv/
+venv/
 .venv/
+.venv-rag/
 __pycache__/
 *.pyc
 .env
 *.env
 .vscode/
 ven/
+data/vectorstore/
+.pytest_cache/
