@@ -1,7 +1,13 @@
+# KnowledgeBase Attribute Inspection:
+# - ChromaDB collection attribute: kb.collection (chromadb.Collection, initialized via kb.initialize() at line 78 & 97)
+# - Embedding model attribute: kb.embedding_model (string name e.g. 'BAAI/bge-small-en-v1.5' at line 72-74; resolved via _get_embedding_model() at line 240)
+# - How embeddings are computed: model.encode([query], show_progress_bar=False).tolist() (line 241; normalize_embeddings is not set, defaulting to False)
+
 """
 Retriever module for AI Security Intelligence Knowledge Base.
 Constructs natural language queries from agent events, retrieves similar threats
-and CVEs from the Knowledge Base, caches queries, and formats context for LLMs.
+and CVEs from the Knowledge Base using per-source filtered retrieval, caches queries,
+and formats context for LLMs.
 """
 
 from __future__ import annotations
@@ -27,6 +33,20 @@ def _get_default_kb() -> KnowledgeBase:
     if _DEFAULT_KB is None:
         _DEFAULT_KB = KnowledgeBase()
     return _DEFAULT_KB
+
+
+def _get_encoder(kb: KnowledgeBase) -> Any:
+    """Get the embedding model instance from KnowledgeBase."""
+    model = getattr(kb, "embedding_model", None)
+    if isinstance(model, str):
+        from src.rag.knowledge_base import _get_embedding_model
+
+        return _get_embedding_model(model)
+    if model is not None and hasattr(model, "encode"):
+        return model
+    from src.rag.knowledge_base import _get_embedding_model
+
+    return _get_embedding_model("BAAI/bge-small-en-v1.5")
 
 
 def build_query_from_event(event: dict) -> str:
@@ -108,9 +128,9 @@ def retrieve_context(
     kb: Optional[KnowledgeBase] = None,
 ) -> Dict[str, Any]:
     """
-    Retrieve threat intelligence and CVE context for an agent event.
-    Separates results into similar_threats and related_cves, applies remediation hints,
-    and caches responses in memory.
+    Retrieve threat intelligence and CVE context for an agent event using
+    two separate metadata-filtered queries (techniques vs vulnerabilities).
+    Applies remediation hints and caches responses in memory.
     """
     if kb is None:
         kb = _get_default_kb()
@@ -123,34 +143,93 @@ def retrieve_context(
         _QUERY_CACHE.move_to_end(cache_key)
         return _QUERY_CACHE[cache_key]
 
-    # Fetch extra results to allow filtering across sources
-    raw_results = kb.similarity_search(query, k=top_k * 2)
+    if kb.collection is None:
+        kb.initialize()
+    collection = kb.collection
+
+    total_count = collection.count() if collection is not None else 0
+    if total_count == 0 or top_k <= 0 or collection is None:
+        result = {
+            "query": query,
+            "similar_threats": [],
+            "related_cves": [],
+            "remediation_hint": "No high-confidence match found in threat intelligence.",
+            "total_retrieved": 0,
+        }
+        if len(_QUERY_CACHE) >= MAX_CACHE_SIZE:
+            _QUERY_CACHE.popitem(last=False)
+        _QUERY_CACHE[cache_key] = result
+        return result
+
+    encoder = _get_encoder(kb)
+    query_embedding = encoder.encode([query], show_progress_bar=False).tolist()
+
+    n_results = min(top_k, total_count)
+
+    # 1. Query techniques (MITRE_ATLAS, MITRE_ATTACK)
+    try:
+        threat_results = collection.query(
+            query_embeddings=query_embedding,
+            n_results=n_results,
+            where={"source": {"$in": ["MITRE_ATLAS", "MITRE_ATTACK"]}},
+        )
+    except Exception as exc:
+        logger.warning("Error querying threat techniques: %s", exc)
+        threat_results = {}
+
+    # 2. Query vulnerabilities (CISA_KEV, NVD_CVE)
+    try:
+        cve_results = collection.query(
+            query_embeddings=query_embedding,
+            n_results=n_results,
+            where={"source": {"$in": ["CISA_KEV", "NVD_CVE"]}},
+        )
+    except Exception as exc:
+        logger.warning("Error querying vulnerabilities: %s", exc)
+        cve_results = {}
 
     similar_threats: List[Dict[str, Any]] = []
-    related_cves: List[Dict[str, Any]] = []
-
-    for doc in raw_results:
-        meta = doc.metadata or {}
-        source = meta.get("source", "")
-        text = doc.page_content
-
-        if source in ("MITRE_ATLAS", "MITRE_ATTACK"):
+    if threat_results and "documents" in threat_results and threat_results["documents"]:
+        docs = threat_results["documents"][0]
+        metas = (
+            threat_results["metadatas"][0]
+            if ("metadatas" in threat_results and threat_results["metadatas"])
+            else [{}] * len(docs)
+        )
+        distances = (
+            threat_results["distances"][0]
+            if ("distances" in threat_results and threat_results["distances"])
+            else [0.0] * len(docs)
+        )
+        for text, meta, dist in zip(docs, metas, distances):
+            meta = meta or {}
+            source = meta.get("source", "")
             threat_id = meta.get("technique_id") or meta.get("id") or ""
-            dist = float(meta.get("distance", 0.0)) if meta.get("distance") is not None else 0.0
             similar_threats.append({
                 "source": source,
                 "id": str(threat_id),
                 "text": text,
-                "distance": dist,
+                "distance": float(dist) if dist is not None else 0.0,
             })
-        elif source in ("CISA_KEV", "NVD_CVE"):
+
+    raw_cves: List[Dict[str, Any]] = []
+    if cve_results and "documents" in cve_results and cve_results["documents"]:
+        docs = cve_results["documents"][0]
+        metas = (
+            cve_results["metadatas"][0]
+            if ("metadatas" in cve_results and cve_results["metadatas"])
+            else [{}] * len(docs)
+        )
+        for text, meta in zip(docs, metas):
+            meta = meta or {}
+            source = meta.get("source", "")
             cve_id = str(meta.get("cve_id") or "")
             severity = str(meta.get("severity") or "UNKNOWN")
             try:
                 cvss_val = float(meta.get("cvss", 0.0))
             except (ValueError, TypeError):
                 cvss_val = 0.0
-            related_cves.append({
+            raw_cves.append({
                 "source": source,
                 "cve_id": cve_id,
                 "severity": severity,
@@ -158,13 +237,11 @@ def retrieve_context(
                 "text": text,
             })
 
-    # Trim to at most top_k items each
     similar_threats = similar_threats[:top_k]
-    related_cves = related_cves[:top_k]
+    raw_cves = raw_cves[:top_k]
 
-    remediation_hint = _compute_remediation_hint(related_cves, similar_threats)
+    remediation_hint = _compute_remediation_hint(raw_cves, similar_threats)
 
-    # Clean related_cves output schema (keys: cve_id, severity, cvss, text)
     cleaned_cves = [
         {
             "cve_id": c["cve_id"],
@@ -172,7 +249,7 @@ def retrieve_context(
             "cvss": c["cvss"],
             "text": c["text"],
         }
-        for c in related_cves
+        for c in raw_cves
     ]
 
     result = {
@@ -183,7 +260,6 @@ def retrieve_context(
         "total_retrieved": len(similar_threats) + len(cleaned_cves),
     }
 
-    # Cache management
     if len(_QUERY_CACHE) >= MAX_CACHE_SIZE:
         _QUERY_CACHE.popitem(last=False)
     _QUERY_CACHE[cache_key] = result

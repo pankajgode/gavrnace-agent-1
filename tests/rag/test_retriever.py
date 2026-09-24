@@ -127,3 +127,56 @@ def test_cache_hit_returns_same_object(seeded_kb):
 
     assert res1 == res2
     assert res1 is res2
+
+
+def test_retrieve_context_returns_threats_and_cves(tmp_path):
+    kb_path = tmp_path / "chroma_dual_query"
+    kb = KnowledgeBase(persist_directory=str(kb_path))
+    docs = [
+        Document(
+            page_content="Adversary performs arbitrary code execution on agent runtime.",
+            metadata={
+                "source": "MITRE_ATLAS",
+                "technique_id": "AML.T0052",
+                "ai_relevant": True,
+            },
+        ),
+        Document(
+            page_content="Remote code execution vulnerability via prompt injection payload.",
+            metadata={
+                "source": "MITRE_ATLAS",
+                "technique_id": "AML.T0053",
+                "ai_relevant": True,
+            },
+        ),
+        Document(
+            page_content="CVE-2024-99001 (CRITICAL, CVSS 9.0): Remote code execution flaw in langchain.",
+            metadata={
+                "source": "NVD_CVE",
+                "cve_id": "CVE-2024-99001",
+                "severity": "CRITICAL",
+                "cvss": 9.0,
+            },
+        ),
+        Document(
+            page_content="CVE-2024-99002 (CRITICAL, CVSS 9.0): Arbitrary code execution flaw in transformers.",
+            metadata={
+                "source": "NVD_CVE",
+                "cve_id": "CVE-2024-99002",
+                "severity": "CRITICAL",
+                "cvss": 9.0,
+            },
+        ),
+    ]
+    kb.add_documents(docs)
+
+    event = {
+        "main_agent": {"name": "ChatGPT", "framework": "browser"},
+        "action": {"tool": "execute:code", "target": "sandbox.py"},
+    }
+
+    result = retrieve_context(event, top_k=2, kb=kb)
+
+    assert len(result["similar_threats"]) >= 1
+    assert len(result["related_cves"]) >= 1
+    assert "CRITICAL" in result["remediation_hint"]
